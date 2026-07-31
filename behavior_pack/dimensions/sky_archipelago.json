@@ -9,21 +9,8 @@
         "min": -64,
         "max": 320
       },
-      "minecraft:dimension_type": {
-        "ultrawarm": false,
-        "natural": false,
-        "piglin_safe": false,
-        "respawn_anchor_works": false,
-        "has_skylight": true,
-        "bed_works": true,
-        "effects": "minecraft:overworld",
-        "has_raids": true,
-        "min_y": -64,
-        "height": 384,
-        "logical_height": 384,
-        "coordinate_scale": 1.0,
-        "ambient_light": 0.0,
-        "infiniburn": "minecraft:infiniburn_overworld"
+      "minecraft:generation": {
+        "generator_type": "void"
       }
     }
   }
