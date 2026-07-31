@@ -29,19 +29,41 @@ world.afterEvents.worldLoad.subscribe(() => {
 });
 
 system.afterEvents.scriptEventReceive.subscribe((event) => {
-  const player = event.sourceEntity;
-  if (!player || player.typeId !== "minecraft:player") return;
-  if (event.id === "firstbedrockaddon:make_island") makeIsland(player);
+  // Do not require event.sourceEntity. A /scriptevent issued from a function
+  // can arrive without a source entity, which previously caused the handler
+  // to return before makeIsland() was ever called.
+  if (event.id === "firstbedrockaddon:make_island") {
+    const player = getCommandPlayer(event);
+    if (!player) {
+      world.sendMessage("§cNo player is available to create the island.");
+      return;
+    }
+    makeIsland(player);
+    return;
+  }
+
   if (event.id === "firstbedrockaddon:set_size") {
+    const player = getCommandPlayer(event);
     const value = Number.parseInt(event.message.trim(), 10);
     if (!Number.isInteger(value) || value < 0 || value > 8) {
-      player.sendMessage("§cIsland size must be a chunk radius from 0 to 8.");
+      (player ?? world).sendMessage("§cIsland size must be a chunk radius from 0 to 8.");
       return;
     }
     CONFIG.islandRadiusChunks = value;
-    player.sendMessage(`§aIsland size set to ${2 * value + 1}×${2 * value + 1} chunks.`);
+    (player ?? world).sendMessage(`§aIsland size set to ${2 * value + 1}×${2 * value + 1} chunks.`);
   }
 });
+
+function getCommandPlayer(event) {
+  // Prefer the event source when Minecraft supplies one.
+  if (event.sourceEntity?.typeId === "minecraft:player") return event.sourceEntity;
+
+  // A function/script event may have no source entity. For the current
+  // single-player testing workflow, use the first online player. This also
+  // makes /function make_island work reliably from chat.
+  const players = world.getAllPlayers();
+  return players.length > 0 ? players[0] : undefined;
+}
 
 function makeIsland(player) {
   if (activeJob) {
@@ -82,6 +104,7 @@ function tickJob() {
     else if (activeJob.phase === "done") finishJob();
   } catch (error) {
     console.warn(`[FloatingIsland] ${error}`);
+    world.sendMessage(`§cFloating island failed: ${error?.message ?? error}`);
     activeJob = null;
     return;
   }
@@ -121,14 +144,11 @@ function isOceanColumn(x, z) {
     const id = String(biome.id || "").replace("minecraft:", "");
     return CONFIG.oceanBiomes.has(id);
   } catch (error) {
-    // getBiome is version-dependent. If unavailable, surface detection still works.
     return false;
   }
 }
 
 function findSurface(x, z) {
-  // Deliberately do NOT use the first non-air block. Trees, leaves, flowers,
-  // structures, and decorations are skipped until a real terrain surface block.
   for (let y = CONFIG.maxY; y >= CONFIG.minY; y--) {
     const block = overworld.getBlock({ x, y, z });
     if (!block) return undefined;
@@ -149,7 +169,6 @@ function captureTerrain() {
       const nx = (column.x - job.centerX) / job.radiusX;
       const nz = (column.z - job.centerZ) / job.radiusZ;
       const distance = Math.min(1, Math.sqrt(nx * nx + nz * nz));
-      // Inverted water-droplet profile: deep in the center, point at the edge.
       const depth = Math.max(1, Math.floor(CONFIG.centerDepth * Math.cos(distance * Math.PI / 2)));
       column.bottomY = Math.max(CONFIG.minY, column.surfaceY - depth);
       column.captureY = column.bottomY;
@@ -165,8 +184,6 @@ function captureTerrain() {
   }
 
   if (job.columnCursor >= job.columns.length) {
-    // Preserve everything above the detected surface too: trees, leaves,
-    // structures, flowers, etc. They are copied with the same Y translation.
     for (const column of job.columns) {
       for (let y = column.surfaceY + 1; y <= CONFIG.maxY; y++) {
         const source = overworld.getBlock({ x: column.x, y, z: column.z });
