@@ -34,7 +34,7 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building version: ${VERSION}"
 
-      - name: Prepare addon folders
+      - name: Prepare addon folders and generate UUIDs
         shell: bash
         run: |
           set -euo pipefail
@@ -47,6 +47,57 @@ jobs:
 
           find dist -type f -name '.DS_Store' -delete
 
+          # Every packaged build gets fresh UUIDs. This prevents Minecraft from
+          # treating a newly built pack as the exact same installed pack.
+          python3 - <<'PY'
+          import json
+          import uuid
+          from pathlib import Path
+
+          bp = Path('dist/SkyArchipelago_BP/manifest.json')
+          rp = Path('dist/SkyArchipelago_RP/manifest.json')
+
+          def new_uuid():
+              return str(uuid.uuid4())
+
+          with bp.open(encoding='utf-8') as f:
+              bp_data = json.load(f)
+
+          with rp.open(encoding='utf-8') as f:
+              rp_data = json.load(f)
+
+          # Fresh pack UUIDs.
+          bp_uuid = new_uuid()
+          rp_uuid = new_uuid()
+
+          bp_data['header']['uuid'] = bp_uuid
+          rp_data['header']['uuid'] = rp_uuid
+
+          # Fresh module UUIDs for every module in both packs.
+          for module in bp_data.get('modules', []):
+              module['uuid'] = new_uuid()
+
+          for module in rp_data.get('modules', []):
+              module['uuid'] = new_uuid()
+
+          # Make the BP depend on this exact build's RP UUID.
+          for dependency in bp_data.get('dependencies', []):
+              if dependency.get('uuid'):
+                  dependency['uuid'] = rp_uuid
+
+          with bp.open('w', encoding='utf-8') as f:
+              json.dump(bp_data, f, indent=2)
+              f.write('\n')
+
+          with rp.open('w', encoding='utf-8') as f:
+              json.dump(rp_data, f, indent=2)
+              f.write('\n')
+
+          print(f'Generated BP UUID: {bp_uuid}')
+          print(f'Generated RP UUID: {rp_uuid}')
+          print('Generated fresh module UUIDs.')
+          PY
+
       - name: Validate manifests
         shell: bash
         run: |
@@ -56,20 +107,39 @@ jobs:
           import json
           from pathlib import Path
 
-          for path in [
-              Path('behavior_pack/manifest.json'),
-              Path('resource_pack/manifest.json')
-          ]:
-              with path.open(encoding='utf-8') as f:
-                  data = json.load(f)
+          bp_path = Path('dist/SkyArchipelago_BP/manifest.json')
+          rp_path = Path('dist/SkyArchipelago_RP/manifest.json')
 
-              assert data.get('header', {}).get('uuid'), \
-                  f'{path}: missing header UUID'
+          with bp_path.open(encoding='utf-8') as f:
+              bp = json.load(f)
 
-              assert data.get('modules'), \
-                  f'{path}: missing modules'
+          with rp_path.open(encoding='utf-8') as f:
+              rp = json.load(f)
 
-              print(f'Validated {path}')
+          assert bp['header']['uuid']
+          assert rp['header']['uuid']
+          assert bp.get('modules')
+          assert rp.get('modules')
+
+          script_modules = [m for m in bp['modules'] if m.get('type') == 'script']
+          assert script_modules, 'Behavior pack has no script module'
+          assert script_modules[0].get('entry') == 'scripts/main.js', \
+              'Script entry must be scripts/main.js'
+
+          assert any(
+              d.get('module_name') == '@minecraft/server'
+              for d in bp.get('dependencies', [])
+          ), '@minecraft/server dependency is missing'
+
+          assert any(
+              d.get('uuid') == rp['header']['uuid']
+              for d in bp.get('dependencies', [])
+          ), 'Behavior pack does not depend on the generated resource pack UUID'
+
+          print(f'Validated BP UUID: {bp["header"]["uuid"]}')
+          print(f'Validated RP UUID: {rp["header"]["uuid"]}')
+          print('Validated script entry: scripts/main.js')
+          print('Validated @minecraft/server dependency')
           PY
 
       - name: Build MCPACK files
