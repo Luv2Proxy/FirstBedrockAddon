@@ -2,10 +2,10 @@
   "format_version": 2,
   "header": {
     "name": "Sky Archipelago Core - Behavior Pack",
-    "description": "Procedural Sky Archipelago foundation for Bedrock 26.33.",
+    "description": "Procedural Sky Archipelago foundation for Bedrock 1.26.33.",
     "uuid": "2d8d7b8a-2d2e-4e43-8c9e-4bdfb6b0f101",
     "version": [0, 1, 0],
-    "min_engine_version": [26, 33, 0]
+    "min_engine_version": [1, 26, 33]
   },
   "modules": [
     {
