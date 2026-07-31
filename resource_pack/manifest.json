@@ -1,0 +1,17 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Sky Archipelago Core - Resource Pack",
+    "description": "Resources for the Sky Archipelago Bedrock project.",
+    "uuid": "b1c2d3e4-f5a6-4789-abcd-ef0123456704",
+    "version": [0, 1, 0],
+    "min_engine_version": [26, 33, 0]
+  },
+  "modules": [
+    {
+      "type": "resources",
+      "uuid": "c2d3e4f5-a6b7-4890-bcde-f01234567805",
+      "version": [0, 1, 0]
+    }
+  ]
+}
