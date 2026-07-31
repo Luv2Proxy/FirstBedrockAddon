@@ -3,6 +3,8 @@ name: Build Bedrock Addon
 on:
   push:
     branches: [ main ]
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
 
@@ -16,6 +18,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="dev-${GITHUB_SHA::7}"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${VERSION}"
 
       - name: Prepare addon folders
         shell: bash
@@ -73,9 +90,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # A .mcaddon is a ZIP containing the .mcpack files.
-          # The -j flag ensures the packs are placed directly inside
-          # the MCADDON without an extra directory layer.
           zip -j release/SkyArchipelago.mcaddon \
             SkyArchipelago_BP.mcpack \
             SkyArchipelago_RP.mcpack >/dev/null
@@ -83,42 +97,32 @@ jobs:
           echo "Created:"
           ls -lh release/SkyArchipelago.mcaddon
 
-      # This artifact will appear as a ZIP when downloaded from
-      # GitHub Actions. This is a limitation of upload-artifact.
       - name: Upload MCADDON CI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SkyArchipelago-mcaddon
+          name: SkyArchipelago-${{ steps.version.outputs.version }}-mcaddon
           path: release/SkyArchipelago.mcaddon
           if-no-files-found: error
 
       - name: Upload MCPACK CI artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: SkyArchipelago-mcpacks
+          name: SkyArchipelago-${{ steps.version.outputs.version }}-mcpacks
           path: |
             SkyArchipelago_BP.mcpack
             SkyArchipelago_RP.mcpack
           if-no-files-found: error
 
-      # A GitHub Release asset is downloaded directly as .mcaddon,
-      # rather than being wrapped in an Actions artifact ZIP.
-      - name: Publish MCADDON Release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: SkyArchipelago Latest Build
-          prerelease: true
-          make_latest: false
+          tag_name: ${{ github.ref_name }}
+          name: SkyArchipelago ${{ github.ref_name }}
+          generate_release_notes: true
           files: |
             release/SkyArchipelago.mcaddon
             SkyArchipelago_BP.mcpack
             SkyArchipelago_RP.mcpack
-          body: |
-            Automatically generated Sky Archipelago Bedrock addon build.
-
-            Download `SkyArchipelago.mcaddon` and open it with Minecraft Bedrock
-            to import both the Behavior Pack and Resource Pack.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
