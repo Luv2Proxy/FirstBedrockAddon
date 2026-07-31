@@ -1,0 +1,8 @@
+{
+  "name": "first-bedrock-addon-behavior-pack",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@minecraft/server": "2.9.0-beta.1.26.33-stable"
+  }
+}
