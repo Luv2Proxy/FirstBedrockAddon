@@ -1,0 +1,78 @@
+name: Build Bedrock Addon
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare addon folders
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+
+          # Copy the two pack roots into a staging directory.
+          cp -r behavior_pack dist/SkyArchipelago_BP
+          cp -r resource_pack dist/SkyArchipelago_RP
+
+          # Remove development-only files from the packaged resource tree if present.
+          find dist -type f -name '.DS_Store' -delete
+
+      - name: Validate manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for path in [Path('behavior_pack/manifest.json'), Path('resource_pack/manifest.json')]:
+              with path.open(encoding='utf-8') as f:
+                  data = json.load(f)
+              assert data.get('header', {}).get('uuid'), f'{path}: missing header UUID'
+              assert data.get('modules'), f'{path}: missing modules'
+              print(f'Validated {path}')
+          PY
+
+      - name: Build MCPACK files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          zip -r ../SkyArchipelago_BP.mcpack SkyArchipelago_BP >/dev/null
+          zip -r ../SkyArchipelago_RP.mcpack SkyArchipelago_RP >/dev/null
+          rm -rf SkyArchipelago_BP SkyArchipelago_RP
+
+      - name: Build MCADDON
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          zip -j release/SkyArchipelago.mcaddon SkyArchipelago_BP.mcpack SkyArchipelago_RP.mcpack >/dev/null
+
+      - name: Upload MCADDON artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkyArchipelago-mcaddon
+          path: release/SkyArchipelago.mcaddon
+          if-no-files-found: error
+
+      - name: Upload MCPACK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkyArchipelago-mcpacks
+          path: |
+            SkyArchipelago_BP.mcpack
+            SkyArchipelago_RP.mcpack
+          if-no-files-found: error
