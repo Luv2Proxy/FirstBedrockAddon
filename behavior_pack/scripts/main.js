@@ -20,7 +20,16 @@ world.afterEvents.worldLoad.subscribe(() => {
   world.sendMessage("§7Floating Island prototype loaded. Use §f/function make_island§7.");
 });
 
-export function makeIsland(player) {
+system.afterEvents.scriptEventReceive.subscribe((event) => {
+  if (event.id !== "firstbedrockaddon:make_island") return;
+
+  const player = event.sourceEntity;
+  if (!player || player.typeId !== "minecraft:player") return;
+
+  makeIsland(player);
+});
+
+function makeIsland(player) {
   if (activeJob) {
     player.sendMessage("§cAn island transformation is already running.");
     return;
@@ -119,16 +128,11 @@ function captureTerrain() {
       const dx = column.x - job.centerX;
       const dz = column.z - job.centerZ;
       const distance = Math.min(1, Math.sqrt(dx * dx + dz * dz) / 11.314);
-
-      // Deepest at the center, shallower at the edges.
       const falloff = Math.cos(distance * Math.PI / 2);
       column.bottomY = Math.max(CONFIG.minY, Math.floor(column.topY - CONFIG.centerDepth * falloff));
       column.captureY = column.bottomY;
     }
 
-    // Capture every block from the convex lower boundary to the real surface.
-    // Nothing is classified or replaced: ores, caves, water, trees, leaves,
-    // structures, and block states are all copied as their exact permutations.
     while (column.captureY <= column.topY && processed < CONFIG.columnsPerTick) {
       const source = overworld.getBlock({ x: column.x, y: column.captureY, z: column.z });
       if (source) {
@@ -150,8 +154,6 @@ function captureTerrain() {
   }
 
   if (job.columnCursor >= job.columns.length) {
-    // Destination is completely above the original source, so the entire
-    // source snapshot must be captured before anything is cleared.
     for (const column of job.columns) {
       for (let y = column.bottomY; y <= column.topY; y++) {
         job.clearBlocks.push({ x: column.x, y, z: column.z });
