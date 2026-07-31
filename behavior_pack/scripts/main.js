@@ -2,195 +2,204 @@ import { world, system } from "@minecraft/server";
 
 const overworld = world.getDimension("overworld");
 
-// Prototype: rip out a complete 64x64x(vertical) terrain section and turn it
-// into one floating island. The original blocks are copied exactly, including
-// caves, ores, liquids, block states, trees, and structures.
+// Test command: /function make_island
+// Extracts the 16x16 chunk containing the executing player, lifts the complete
+// generated terrain volume, then carves its underside into a convex shape.
 const CONFIG = {
-  centerX: 0,
-  centerZ: 0,
-  radius: 32,
-  // The island is carved from a real generated terrain volume. This is the
-  // lowest Y retained at the island center; the underside tapers upward toward
-  // the edge. Adjust this to change island depth.
-  islandBottomY: 35,
-  scanMinY: -64,
-  scanMaxY: 320,
-  processPerTick: 16,
-  // How many blocks are copied per tick. Kept low to avoid freezing the game.
-  blocksPerTick: 12000
+  liftY: 80,
+  minY: -64,
+  maxY: 320,
+  columnsPerTick: 8,
+  blocksPerTick: 4000,
+  centerDepth: 48
 };
 
-let started = false;
-let scanQueue = [];
-let scanCursor = 0;
-let columns = new Map();
-let copyQueue = [];
-let copyCursor = 0;
-let clearQueue = [];
-let clearCursor = 0;
-let phase = "waiting";
-let completionAnnounced = false;
+let activeJob = null;
 
 world.afterEvents.worldLoad.subscribe(() => {
-  system.runTimeout(() => {
-    if (!started) startPrototype();
-  }, 40);
+  world.sendMessage("§7Floating Island prototype loaded. Use §f/function make_island§7.");
 });
 
-function startPrototype() {
-  if (started) return;
-  started = true;
-
-  for (let x = CONFIG.centerX - CONFIG.radius; x <= CONFIG.centerX + CONFIG.radius; x++) {
-    for (let z = CONFIG.centerZ - CONFIG.radius; z <= CONFIG.centerZ + CONFIG.radius; z++) {
-      const dx = x - CONFIG.centerX;
-      const dz = z - CONFIG.centerZ;
-      if (dx * dx + dz * dz <= CONFIG.radius * CONFIG.radius) {
-        scanQueue.push({ x, z });
-      }
-    }
+export function makeIsland(player) {
+  if (activeJob) {
+    player.sendMessage("§cAn island transformation is already running.");
+    return;
   }
 
-  phase = "scanning";
-  world.sendMessage("§bFloating Island: ripping out a section of generated terrain...");
+  const minX = Math.floor(player.location.x / 16) * 16;
+  const minZ = Math.floor(player.location.z / 16) * 16;
+
+  activeJob = {
+    minX,
+    minZ,
+    maxX: minX + 15,
+    maxZ: minZ + 15,
+    centerX: minX + 7.5,
+    centerZ: minZ + 7.5,
+    phase: "scan",
+    scanX: minX,
+    scanZ: minZ,
+    columns: [],
+    columnCursor: 0,
+    captureY: null,
+    writeCursor: 0,
+    clearCursor: 0,
+    blocks: [],
+    clearBlocks: []
+  };
+
+  player.sendMessage(`§bExtracting chunk ${minX}, ${minZ} and lifting it ${CONFIG.liftY} blocks...`);
+  tickJob();
 }
 
-system.runInterval(() => {
-  if (!started) return;
+function tickJob() {
+  if (!activeJob) return;
 
   try {
-    if (phase === "scanning") scanColumns();
-    else if (phase === "copying") copyTerrain();
-    else if (phase === "clearing") clearOriginalTerrain();
-    else if (phase === "done" && !completionAnnounced) {
-      completionAnnounced = true;
-      world.sendMessage("§aFloating Island: complete! Original terrain, caves, ores, and structures preserved.");
+    switch (activeJob.phase) {
+      case "scan": scanSurface(); break;
+      case "capture": captureTerrain(); break;
+      case "write": writeTerrain(); break;
+      case "clear": clearOriginalTerrain(); break;
+      case "done": finishJob(); return;
     }
   } catch (error) {
     console.warn(`[FloatingIsland] ${error}`);
+    activeJob = null;
+    return;
   }
-}, 1);
 
-function scanColumns() {
+  if (activeJob) system.run(tickJob);
+}
+
+function scanSurface() {
+  const job = activeJob;
   let processed = 0;
 
-  while (scanCursor < scanQueue.length && processed < CONFIG.processPerTick) {
-    const { x, z } = scanQueue[scanCursor++];
+  while (job.scanZ <= job.maxZ && processed < CONFIG.columnsPerTick) {
+    const x = job.scanX;
+    const z = job.scanZ;
+    const topY = findSurface(x, z);
 
-    // getBlock returns undefined when the relevant chunk is not loaded.
-    // The prototype is intended to run around the initially loaded spawn area.
-    const top = findTopBlock(x, z);
-    if (top !== undefined) {
-      columns.set(`${x},${z}`, {
-        x,
-        z,
-        topY: top
-      });
+    if (topY !== undefined) job.columns.push({ x, z, topY });
+
+    job.scanX++;
+    if (job.scanX > job.maxX) {
+      job.scanX = job.minX;
+      job.scanZ++;
     }
-
     processed++;
   }
 
-  if (scanCursor >= scanQueue.length) {
-    buildCopyQueue();
-    phase = "copying";
-    world.sendMessage(`§bFloating Island: captured ${columns.size} terrain columns. Copying the actual terrain volume...`);
+  if (job.scanZ > job.maxZ) {
+    job.phase = "capture";
+    job.columnCursor = 0;
+    job.captureY = null;
+    world.sendMessage(`§bFound ${job.columns.length} terrain columns. Capturing the exact 3D terrain, including caves and ores...`);
   }
 }
 
-function findTopBlock(x, z) {
-  for (let y = CONFIG.scanMaxY; y >= CONFIG.scanMinY; y--) {
+function findSurface(x, z) {
+  for (let y = CONFIG.maxY; y >= CONFIG.minY; y--) {
     const block = overworld.getBlock({ x, y, z });
-    if (!block) continue;
-
-    if (!isAir(block.typeId)) {
-      // IMPORTANT: grass, logs, leaves, wool, cobblestone, planks, etc. are
-      // NOT ignored here. The top of the generated terrain is the first actual
-      // non-air block. Everything from this block downward is copied exactly.
-      return y;
-    }
+    if (!block) return undefined;
+    if (!isAir(block.typeId)) return y;
   }
-
   return undefined;
 }
 
-function buildCopyQueue() {
-  copyQueue = [];
+function captureTerrain() {
+  const job = activeJob;
+  let processed = 0;
 
-  for (const column of columns.values()) {
-    const dx = column.x - CONFIG.centerX;
-    const dz = column.z - CONFIG.centerZ;
-    const distance = Math.sqrt(dx * dx + dz * dz) / CONFIG.radius;
+  while (job.columnCursor < job.columns.length && processed < CONFIG.columnsPerTick) {
+    const column = job.columns[job.columnCursor];
 
-    // Smooth convex underside: deepest in the center, rising toward the edge.
-    const falloff = Math.cos(Math.min(1, distance) * Math.PI / 2);
-    const bottomY = Math.floor(CONFIG.islandBottomY + falloff * Math.max(0, column.topY - CONFIG.islandBottomY));
+    if (job.captureY === null) {
+      const dx = column.x - job.centerX;
+      const dz = column.z - job.centerZ;
+      const distance = Math.min(1, Math.sqrt(dx * dx + dz * dz) / 11.314);
 
-    column.bottomY = Math.min(bottomY, column.topY);
-
-    // Copy every block in the original terrain volume, not a replacement
-    // material. This preserves caves, ores, liquids, block states, etc.
-    for (let y = column.bottomY; y <= column.topY; y++) {
-      copyQueue.push({ x: column.x, y, z: column.z });
+      // Deepest at the center, shallower at the edges.
+      const falloff = Math.cos(distance * Math.PI / 2);
+      column.bottomY = Math.max(CONFIG.minY, Math.floor(column.topY - CONFIG.centerDepth * falloff));
+      column.captureY = column.bottomY;
     }
+
+    // Capture every block from the convex lower boundary to the real surface.
+    // Nothing is classified or replaced: ores, caves, water, trees, leaves,
+    // structures, and block states are all copied as their exact permutations.
+    while (column.captureY <= column.topY && processed < CONFIG.columnsPerTick) {
+      const source = overworld.getBlock({ x: column.x, y: column.captureY, z: column.z });
+      if (source) {
+        job.blocks.push({
+          x: column.x,
+          y: column.captureY + CONFIG.liftY,
+          z: column.z,
+          permutation: source.permutation
+        });
+      }
+      column.captureY++;
+      processed++;
+    }
+
+    if (column.captureY > column.topY) {
+      job.columnCursor++;
+      job.captureY = null;
+    }
+  }
+
+  if (job.columnCursor >= job.columns.length) {
+    // Destination is completely above the original source, so the entire
+    // source snapshot must be captured before anything is cleared.
+    for (const column of job.columns) {
+      for (let y = column.bottomY; y <= column.topY; y++) {
+        job.clearBlocks.push({ x: column.x, y, z: column.z });
+      }
+    }
+
+    job.phase = "write";
+    job.writeCursor = 0;
+    world.sendMessage(`§bCaptured ${job.blocks.length.toLocaleString()} blocks. Lifting the terrain...`);
   }
 }
 
-function copyTerrain() {
-  let copied = 0;
-  const limit = CONFIG.blocksPerTick;
+function writeTerrain() {
+  const job = activeJob;
+  let written = 0;
 
-  while (copyCursor < copyQueue.length && copied < limit) {
-    const pos = copyQueue[copyCursor++];
-    const source = overworld.getBlock(pos);
-
-    if (source) {
-      // Store the exact permutation. This retains block states such as facing,
-      // orientation, waterlogged state, etc.
-      // For this first prototype, the island is created by vertically retaining
-      // the actual generated terrain at its original coordinates while the
-      // tapered underside is filled from the captured volume.
-      const target = overworld.getBlock(pos);
-      if (target) target.setPermutation(source.permutation);
-    }
-
-    copied++;
+  while (job.writeCursor < job.blocks.length && written < CONFIG.blocksPerTick) {
+    const item = job.blocks[job.writeCursor++];
+    const target = overworld.getBlock({ x: item.x, y: item.y, z: item.z });
+    if (target) target.setPermutation(item.permutation);
+    written++;
   }
 
-  if (copyCursor >= copyQueue.length) {
-    buildClearQueue();
-    phase = "clearing";
-    world.sendMessage("§bFloating Island: terrain captured. Removing everything below the new island shape...");
-  }
-}
-
-function buildClearQueue() {
-  clearQueue = [];
-
-  for (const column of columns.values()) {
-    for (let y = CONFIG.scanMinY; y < column.bottomY; y++) {
-      clearQueue.push({ x: column.x, y, z: column.z });
-    }
+  if (job.writeCursor >= job.blocks.length) {
+    job.phase = "clear";
+    job.clearCursor = 0;
+    world.sendMessage("§bThe extracted terrain is now floating. Clearing the original chunk section...");
   }
 }
 
 function clearOriginalTerrain() {
+  const job = activeJob;
   let cleared = 0;
 
-  while (clearCursor < clearQueue.length && cleared < CONFIG.blocksPerTick) {
-    const pos = clearQueue[clearCursor++];
+  while (job.clearCursor < job.clearBlocks.length && cleared < CONFIG.blocksPerTick) {
+    const pos = job.clearBlocks[job.clearCursor++];
     const block = overworld.getBlock(pos);
-
-    if (block && !isAir(block.typeId)) {
-      block.setType("minecraft:air");
-    }
-
+    if (block && !isAir(block.typeId)) block.setType("minecraft:air");
     cleared++;
   }
 
-  if (clearCursor >= clearQueue.length) {
-    phase = "done";
-  }
+  if (job.clearCursor >= job.clearBlocks.length) job.phase = "done";
+}
+
+function finishJob() {
+  const job = activeJob;
+  world.sendMessage(`§aFloating Island complete! Chunk ${job.minX}, ${job.minZ} was extracted and lifted ${CONFIG.liftY} blocks.`);
+  activeJob = null;
 }
 
 function isAir(typeId) {
