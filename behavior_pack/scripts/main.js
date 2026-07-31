@@ -24,20 +24,26 @@ const CONFIG = {
 
 let activeJob = null;
 
-world.afterEvents.worldLoad.subscribe(() => {
-  world.sendMessage("§7Floating Island prototype loaded. Use §f/function make_island§7.");
+// Deliberately use a startup tick instead of worldLoad. This is more reliable
+// for script packs because the worldLoad event can fire before a player is
+// available and is not needed for initialization.
+system.run(() => {
+  world.sendMessage("§a[SkyArchipelago] JavaScript loaded!");
 });
 
 system.afterEvents.scriptEventReceive.subscribe((event) => {
-  // Do not require event.sourceEntity. A /scriptevent issued from a function
-  // can arrive without a source entity, which previously caused the handler
-  // to return before makeIsland() was ever called.
+  // Always log receipt while testing. This makes it obvious whether the
+  // script event reached the JavaScript runtime.
+  world.sendMessage(`§e[SkyArchipelago] Event received: ${event.id}`);
+
   if (event.id === "firstbedrockaddon:make_island") {
     const player = getCommandPlayer(event);
     if (!player) {
-      world.sendMessage("§cNo player is available to create the island.");
+      world.sendMessage("§c[SkyArchipelago] No player is available to create the island.");
       return;
     }
+
+    world.sendMessage(`§b[SkyArchipelago] Starting island at ${Math.floor(player.location.x)}, ${Math.floor(player.location.y)}, ${Math.floor(player.location.z)}`);
     makeIsland(player);
     return;
   }
@@ -45,22 +51,25 @@ system.afterEvents.scriptEventReceive.subscribe((event) => {
   if (event.id === "firstbedrockaddon:set_size") {
     const player = getCommandPlayer(event);
     const value = Number.parseInt(event.message.trim(), 10);
+
     if (!Number.isInteger(value) || value < 0 || value > 8) {
       (player ?? world).sendMessage("§cIsland size must be a chunk radius from 0 to 8.");
       return;
     }
+
     CONFIG.islandRadiusChunks = value;
     (player ?? world).sendMessage(`§aIsland size set to ${2 * value + 1}×${2 * value + 1} chunks.`);
   }
 });
 
 function getCommandPlayer(event) {
-  // Prefer the event source when Minecraft supplies one.
-  if (event.sourceEntity?.typeId === "minecraft:player") return event.sourceEntity;
+  // Prefer the actual event source when Minecraft provides one.
+  if (event.sourceEntity?.typeId === "minecraft:player") {
+    return event.sourceEntity;
+  }
 
-  // A function/script event may have no source entity. For the current
-  // single-player testing workflow, use the first online player. This also
-  // makes /function make_island work reliably from chat.
+  // /scriptevent invoked from a .mcfunction may not expose sourceEntity.
+  // For testing, use the first online player so the event still works.
   const players = world.getAllPlayers();
   return players.length > 0 ? players[0] : undefined;
 }
@@ -85,9 +94,16 @@ function makeIsland(player) {
     centerZ: (minZ + maxZ) / 2,
     radiusX: (maxX - minX + 1) / 2,
     radiusZ: (maxZ - minZ + 1) / 2,
-    phase: "scan", scanX: minX, scanZ: minZ,
-    columns: [], columnCursor: 0, captureY: null,
-    blocks: [], writeCursor: 0, clearBlocks: [], clearCursor: 0
+    phase: "scan",
+    scanX: minX,
+    scanZ: minZ,
+    columns: [],
+    columnCursor: 0,
+    captureY: null,
+    blocks: [],
+    writeCursor: 0,
+    clearBlocks: [],
+    clearCursor: 0
   };
 
   player.sendMessage(`§bPreparing ${2 * r + 1}×${2 * r + 1} chunk island...`);
@@ -96,6 +112,7 @@ function makeIsland(player) {
 
 function tickJob() {
   if (!activeJob) return;
+
   try {
     if (activeJob.phase === "scan") scanSurface();
     else if (activeJob.phase === "capture") captureTerrain();
@@ -108,28 +125,39 @@ function tickJob() {
     activeJob = null;
     return;
   }
+
   if (activeJob) system.run(tickJob);
 }
 
 function scanSurface() {
   const job = activeJob;
   let count = 0;
+
   while (job.scanZ <= job.maxZ && count < CONFIG.columnsPerTick) {
-    const x = job.scanX, z = job.scanZ;
+    const x = job.scanX;
+    const z = job.scanZ;
+
     if (!isOceanColumn(x, z)) {
       const surfaceY = findSurface(x, z);
       if (surfaceY !== undefined) job.columns.push({ x, z, surfaceY });
     }
+
     job.scanX++;
-    if (job.scanX > job.maxX) { job.scanX = job.minX; job.scanZ++; }
+    if (job.scanX > job.maxX) {
+      job.scanX = job.minX;
+      job.scanZ++;
+    }
+
     count++;
   }
+
   if (job.scanZ > job.maxZ) {
     if (job.columns.length === 0) {
       world.sendMessage("§cNo land columns found. Try a non-ocean location or ensure the area is loaded.");
       activeJob = null;
       return;
     }
+
     job.phase = "capture";
     job.columnCursor = 0;
     job.captureY = null;
@@ -153,9 +181,11 @@ function findSurface(x, z) {
     const block = overworld.getBlock({ x, y, z });
     if (!block) return undefined;
     if (isAir(block.typeId)) continue;
+
     const id = block.typeId.replace("minecraft:", "");
     if (CONFIG.surfaceBlocks.has(id)) return y;
   }
+
   return undefined;
 }
 
@@ -165,34 +195,69 @@ function captureTerrain() {
 
   while (job.columnCursor < job.columns.length && processed < CONFIG.columnsPerTick) {
     const column = job.columns[job.columnCursor];
+
     if (job.captureY === null) {
       const nx = (column.x - job.centerX) / job.radiusX;
       const nz = (column.z - job.centerZ) / job.radiusZ;
       const distance = Math.min(1, Math.sqrt(nx * nx + nz * nz));
       const depth = Math.max(1, Math.floor(CONFIG.centerDepth * Math.cos(distance * Math.PI / 2)));
+
       column.bottomY = Math.max(CONFIG.minY, column.surfaceY - depth);
       column.captureY = column.bottomY;
     }
 
     while (column.captureY <= column.surfaceY && processed < CONFIG.columnsPerTick) {
-      const source = overworld.getBlock({ x: column.x, y: column.captureY, z: column.z });
-      if (source) job.blocks.push({ x: column.x, y: column.captureY + CONFIG.liftY, z: column.z, permutation: source.permutation });
+      const source = overworld.getBlock({
+        x: column.x,
+        y: column.captureY,
+        z: column.z
+      });
+
+      if (source) {
+        job.blocks.push({
+          x: column.x,
+          y: column.captureY + CONFIG.liftY,
+          z: column.z,
+          permutation: source.permutation
+        });
+      }
+
       column.captureY++;
       processed++;
     }
-    if (column.captureY > column.surfaceY) { job.columnCursor++; job.captureY = null; }
+
+    if (column.captureY > column.surfaceY) {
+      job.columnCursor++;
+      job.captureY = null;
+    }
   }
 
   if (job.columnCursor >= job.columns.length) {
     for (const column of job.columns) {
+      // Preserve trees, leaves, flowers, structures, and everything else above
+      // the actual detected terrain surface.
       for (let y = column.surfaceY + 1; y <= CONFIG.maxY; y++) {
         const source = overworld.getBlock({ x: column.x, y, z: column.z });
+
         if (source && !isAir(source.typeId)) {
-          job.blocks.push({ x: column.x, y: y + CONFIG.liftY, z: column.z, permutation: source.permutation });
+          job.blocks.push({
+            x: column.x,
+            y: y + CONFIG.liftY,
+            z: column.z,
+            permutation: source.permutation
+          });
         }
       }
-      for (let y = column.bottomY; y <= CONFIG.maxY; y++) job.clearBlocks.push({ x: column.x, y, z: column.z });
+
+      for (let y = column.bottomY; y <= CONFIG.maxY; y++) {
+        job.clearBlocks.push({
+          x: column.x,
+          y,
+          z: column.z
+        });
+      }
     }
+
     job.phase = "write";
     job.writeCursor = 0;
     world.sendMessage(`§bCaptured ${job.blocks.length.toLocaleString()} blocks. Moving the complete island...`);
@@ -202,12 +267,19 @@ function captureTerrain() {
 function writeTerrain() {
   const job = activeJob;
   let count = 0;
+
   while (job.writeCursor < job.blocks.length && count < CONFIG.blocksPerTick) {
     const item = job.blocks[job.writeCursor++];
-    const target = overworld.getBlock({ x: item.x, y: item.y, z: item.z });
+    const target = overworld.getBlock({
+      x: item.x,
+      y: item.y,
+      z: item.z
+    });
+
     if (target) target.setPermutation(item.permutation);
     count++;
   }
+
   if (job.writeCursor >= job.blocks.length) {
     job.phase = "clear";
     job.clearCursor = 0;
@@ -218,23 +290,34 @@ function writeTerrain() {
 function clearOriginalTerrain() {
   const job = activeJob;
   let count = 0;
+
   while (job.clearCursor < job.clearBlocks.length && count < CONFIG.blocksPerTick) {
     const pos = job.clearBlocks[job.clearCursor++];
     const block = overworld.getBlock(pos);
-    if (block && !isAir(block.typeId)) block.setType("minecraft:air");
+
+    if (block && !isAir(block.typeId)) {
+      block.setType("minecraft:air");
+    }
+
     count++;
   }
-  if (job.clearCursor >= job.clearBlocks.length) job.phase = "done";
+
+  if (job.clearCursor >= job.clearBlocks.length) {
+    job.phase = "done";
+  }
 }
 
 function finishJob() {
   const job = activeJob;
   const sx = (job.maxX - job.minX + 1) / 16;
   const sz = (job.maxZ - job.minZ + 1) / 16;
+
   world.sendMessage(`§aFloating island complete! ${sx}×${sz} chunks lifted ${CONFIG.liftY} blocks.`);
   activeJob = null;
 }
 
 function isAir(typeId) {
-  return typeId === "minecraft:air" || typeId === "minecraft:cave_air" || typeId === "minecraft:void_air";
+  return typeId === "minecraft:air" ||
+    typeId === "minecraft:cave_air" ||
+    typeId === "minecraft:void_air";
 }
