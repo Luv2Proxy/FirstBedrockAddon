@@ -2,16 +2,52 @@ import { world, system } from "@minecraft/server";
 
 const overworld = world.getDimension("overworld");
 
-// Test command: /function make_island
-// Extracts the 16x16 chunk containing the executing player, lifts the complete
-// generated terrain volume, then carves its underside into a convex shape.
+// /function make_island
+// Extracts a configurable square region around the player's chunk.
+// The first recognized natural surface block is the top of the extracted mass.
+// Everything at and below it is preserved exactly, while everything above it
+// (trees, structures, leaves, etc.) remains attached and moves with it.
 const CONFIG = {
+  // Change this value in-game with /scriptevent firstbedrockaddon:set_size N
+  // or edit it here. This is the radius in chunks around the player's chunk.
+  // 0 = 1x1 chunk, 1 = 3x3 chunks, 2 = 5x5 chunks, etc.
+  islandRadiusChunks: 1,
   liftY: 80,
   minY: -64,
   maxY: 320,
-  columnsPerTick: 8,
-  blocksPerTick: 4000,
-  centerDepth: 48
+  columnsPerTick: 16,
+  blocksPerTick: 5000,
+  centerDepth: 64,
+  surfaceBlocks: new Set([
+    "minecraft:grass_block",
+    "minecraft:dirt",
+    "minecraft:coarse_dirt",
+    "minecraft:rooted_dirt",
+    "minecraft:podzol",
+    "minecraft:mycelium",
+    "minecraft:grass_path",
+    "minecraft:sand",
+    "minecraft:red_sand",
+    "minecraft:sandstone",
+    "minecraft:red_sandstone",
+    "minecraft:terracotta",
+    "minecraft:white_terracotta",
+    "minecraft:orange_terracotta",
+    "minecraft:magenta_terracotta",
+    "minecraft:light_blue_terracotta",
+    "minecraft:yellow_terracotta",
+    "minecraft:lime_terracotta",
+    "minecraft:pink_terracotta",
+    "minecraft:gray_terracotta",
+    "minecraft:light_gray_terracotta",
+    "minecraft:cyan_terracotta",
+    "minecraft:purple_terracotta",
+    "minecraft:blue_terracotta",
+    "minecraft:brown_terracotta",
+    "minecraft:green_terracotta",
+    "minecraft:red_terracotta",
+    "minecraft:black_terracotta"
+  ])
 };
 
 let activeJob = null;
@@ -21,12 +57,23 @@ world.afterEvents.worldLoad.subscribe(() => {
 });
 
 system.afterEvents.scriptEventReceive.subscribe((event) => {
-  if (event.id !== "firstbedrockaddon:make_island") return;
-
   const player = event.sourceEntity;
   if (!player || player.typeId !== "minecraft:player") return;
 
-  makeIsland(player);
+  if (event.id === "firstbedrockaddon:make_island") {
+    makeIsland(player);
+    return;
+  }
+
+  if (event.id === "firstbedrockaddon:set_size") {
+    const value = Number.parseInt(event.message.trim(), 10);
+    if (!Number.isFinite(value) || value < 0 || value > 8) {
+      player.sendMessage("§cIsland size must be a chunk radius from 0 to 8.");
+      return;
+    }
+    CONFIG.islandRadiusChunks = value;
+    player.sendMessage(`§aIsland size set to ${2 * value + 1}×${2 * value + 1} chunks.`);
+  }
 });
 
 function makeIsland(player) {
@@ -35,16 +82,20 @@ function makeIsland(player) {
     return;
   }
 
-  const minX = Math.floor(player.location.x / 16) * 16;
-  const minZ = Math.floor(player.location.z / 16) * 16;
+  const playerChunkX = Math.floor(player.location.x / 16);
+  const playerChunkZ = Math.floor(player.location.z / 16);
+  const radius = CONFIG.islandRadiusChunks;
+  const minX = (playerChunkX - radius) * 16;
+  const minZ = (playerChunkZ - radius) * 16;
+  const maxX = (playerChunkX + radius + 1) * 16 - 1;
+  const maxZ = (playerChunkZ + radius + 1) * 16 - 1;
 
   activeJob = {
-    minX,
-    minZ,
-    maxX: minX + 15,
-    maxZ: minZ + 15,
-    centerX: minX + 7.5,
-    centerZ: minZ + 7.5,
+    minX, minZ, maxX, maxZ,
+    centerX: (minX + maxX) / 2,
+    centerZ: (minZ + maxZ) / 2,
+    radiusX: (maxX - minX + 1) / 2,
+    radiusZ: (maxZ - minZ + 1) / 2,
     phase: "scan",
     scanX: minX,
     scanZ: minZ,
@@ -57,7 +108,7 @@ function makeIsland(player) {
     clearBlocks: []
   };
 
-  player.sendMessage(`§bExtracting chunk ${minX}, ${minZ} and lifting it ${CONFIG.liftY} blocks...`);
+  player.sendMessage(`§bExtracting ${2 * radius + 1}×${2 * radius + 1} chunks. Surface detection and 3D terrain capture starting...`);
   tickJob();
 }
 
@@ -88,9 +139,9 @@ function scanSurface() {
   while (job.scanZ <= job.maxZ && processed < CONFIG.columnsPerTick) {
     const x = job.scanX;
     const z = job.scanZ;
-    const topY = findSurface(x, z);
+    const surfaceY = findSurface(x, z);
 
-    if (topY !== undefined) job.columns.push({ x, z, topY });
+    if (surfaceY !== undefined) job.columns.push({ x, z, surfaceY });
 
     job.scanX++;
     if (job.scanX > job.maxX) {
@@ -104,16 +155,26 @@ function scanSurface() {
     job.phase = "capture";
     job.columnCursor = 0;
     job.captureY = null;
-    world.sendMessage(`§bFound ${job.columns.length} terrain columns. Capturing the exact 3D terrain, including caves and ores...`);
+    world.sendMessage(`§bFound ${job.columns.length} surface columns. Capturing terrain below the real surface, including caves and ores...`);
   }
 }
 
 function findSurface(x, z) {
+  // Start at the highest non-air block. This lets trees/structures be found,
+  // then continue downward until we hit the actual natural surface material.
+  let foundAboveSurface = false;
+
   for (let y = CONFIG.maxY; y >= CONFIG.minY; y--) {
     const block = overworld.getBlock({ x, y, z });
     if (!block) return undefined;
-    if (!isAir(block.typeId)) return y;
+    if (isAir(block.typeId)) continue;
+
+    foundAboveSurface = true;
+    if (foundAboveSurface && CONFIG.surfaceBlocks.has(block.typeId)) {
+      return y;
+    }
   }
+
   return undefined;
 }
 
@@ -125,15 +186,18 @@ function captureTerrain() {
     const column = job.columns[job.columnCursor];
 
     if (job.captureY === null) {
-      const dx = column.x - job.centerX;
-      const dz = column.z - job.centerZ;
-      const distance = Math.min(1, Math.sqrt(dx * dx + dz * dz) / 11.314);
+      const nx = (column.x - job.centerX) / job.radiusX;
+      const nz = (column.z - job.centerZ) / job.radiusZ;
+      const distance = Math.min(1, Math.sqrt(nx * nx + nz * nz));
+
+      // A water-droplet / inverted-dome profile. The center gets the deepest
+      // extracted terrain; the edge comes to a point.
       const falloff = Math.cos(distance * Math.PI / 2);
-      column.bottomY = Math.max(CONFIG.minY, Math.floor(column.topY - CONFIG.centerDepth * falloff));
+      column.bottomY = Math.max(CONFIG.minY, Math.floor(column.surfaceY - CONFIG.centerDepth * falloff));
       column.captureY = column.bottomY;
     }
 
-    while (column.captureY <= column.topY && processed < CONFIG.columnsPerTick) {
+    while (column.captureY <= column.surfaceY && processed < CONFIG.columnsPerTick) {
       const source = overworld.getBlock({ x: column.x, y: column.captureY, z: column.z });
       if (source) {
         job.blocks.push({
@@ -147,22 +211,38 @@ function captureTerrain() {
       processed++;
     }
 
-    if (column.captureY > column.topY) {
+    if (column.captureY > column.surfaceY) {
       job.columnCursor++;
       job.captureY = null;
     }
   }
 
   if (job.columnCursor >= job.columns.length) {
+    // Clear exactly the source volume that was captured. The top includes the
+    // detected surface, while blocks above it are also moved separately below.
+    // This second pass captures all blocks above the surface so trees and
+    // structures stay attached to the extracted terrain.
     for (const column of job.columns) {
-      for (let y = column.bottomY; y <= column.topY; y++) {
+      for (let y = CONFIG.maxY; y > column.surfaceY; y--) {
+        const source = overworld.getBlock({ x: column.x, y, z: column.z });
+        if (source && !isAir(source.typeId)) {
+          job.blocks.push({
+            x: column.x,
+            y: y + CONFIG.liftY,
+            z: column.z,
+            permutation: source.permutation
+          });
+        }
+      }
+
+      for (let y = column.bottomY; y <= CONFIG.maxY; y++) {
         job.clearBlocks.push({ x: column.x, y, z: column.z });
       }
     }
 
     job.phase = "write";
     job.writeCursor = 0;
-    world.sendMessage(`§bCaptured ${job.blocks.length.toLocaleString()} blocks. Lifting the terrain...`);
+    world.sendMessage(`§bCaptured ${job.blocks.length.toLocaleString()} blocks. Moving the complete surface, vegetation, structures, caves, and ores upward...`);
   }
 }
 
@@ -180,7 +260,7 @@ function writeTerrain() {
   if (job.writeCursor >= job.blocks.length) {
     job.phase = "clear";
     job.clearCursor = 0;
-    world.sendMessage("§bThe extracted terrain is now floating. Clearing the original chunk section...");
+    world.sendMessage("§bThe complete terrain mass has been lifted. Clearing the original extracted region...");
   }
 }
 
@@ -200,7 +280,7 @@ function clearOriginalTerrain() {
 
 function finishJob() {
   const job = activeJob;
-  world.sendMessage(`§aFloating Island complete! Chunk ${job.minX}, ${job.minZ} was extracted and lifted ${CONFIG.liftY} blocks.`);
+  world.sendMessage(`§aFloating island complete! Extracted ${((job.maxX - job.minX + 1) / 16)}×${((job.maxZ - job.minZ + 1) / 16)} chunks and lifted them ${CONFIG.liftY} blocks.`);
   activeJob = null;
 }
 
